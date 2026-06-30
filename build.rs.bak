@@ -1,0 +1,134 @@
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn include_if_exists(build: &mut cc::Build, path: impl AsRef<Path>) {
+    let path = path.as_ref();
+    if path.exists() {
+        build.include(path);
+    }
+}
+
+fn add_recursive_include_dirs(build: &mut cc::Build, root: &Path) {
+    fn walk(build: &mut cc::Build, dir: &Path) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+
+            if !path.is_dir() {
+                continue;
+            }
+
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            if name == "include" || name == "private_include" {
+                build.include(&path);
+            }
+
+            walk(build, &path);
+        }
+    }
+
+    walk(build, root);
+}
+
+fn find_esp_idf_path() -> PathBuf {
+    if let Ok(idf_path) = env::var("IDF_PATH") {
+        return PathBuf::from(idf_path);
+    }
+
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let base = manifest_dir.join(".embuild/espressif/esp-idf");
+
+    if base.join("v5.2.3").exists() {
+        return base.join("v5.2.3");
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(&base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                candidates.push(path);
+            }
+        }
+    }
+
+    candidates.sort();
+    candidates
+        .pop()
+        .unwrap_or_else(|| base.join("v5.2.3"))
+}
+
+fn find_esp_idf_build_config() -> Option<PathBuf> {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").ok()?);
+
+    // OUT_DIR ungefähr:
+    // target/xtensa-esp32s3-espidf/release/build/yd_.../out
+    let build_root = out_dir.parent()?.parent()?;
+
+    for entry in fs::read_dir(build_root).ok()? {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+
+        if name.starts_with("esp-idf-sys-") {
+            let config = entry.path().join("out/build/config");
+            if config.exists() {
+                return Some(config);
+            }
+        }
+    }
+
+    None
+}
+
+fn main() {
+    embuild::espidf::sysenv::output();
+
+    println!("cargo:rerun-if-changed=native/yd_hw.c");
+    println!("cargo:rerun-if-changed=native/yd_hw.h");
+
+    let idf_path = find_esp_idf_path();
+    println!("cargo:warning=Using ESP-IDF path: {}", idf_path.display());
+
+    let mut build = cc::Build::new();
+
+    build
+        .file("native/yd_hw.c")
+        .include("native")
+        .warnings(false)
+        .define("ESP_PLATFORM", Some("1"));
+
+    if let Some(config_path) = find_esp_idf_build_config() {
+        build.include(config_path);
+    }
+
+    // Alle normalen ESP-IDF include/private_include Ordner automatisch finden.
+    add_recursive_include_dirs(&mut build, &idf_path.join("components"));
+
+    // Extra-Pfade, die oft nicht einfach "include" heißen.
+    let extra_dirs = [
+        "components/fatfs/src",
+        "components/fatfs/vfs",
+        "components/freertos/config/include",
+        "components/freertos/config/xtensa/include",
+        "components/freertos/FreeRTOS-Kernel/include",
+        "components/freertos/FreeRTOS-Kernel/portable/xtensa/include",
+        "components/freertos/esp_additions/include",
+        "components/newlib/platform_include",
+    ];
+
+    for dir in extra_dirs {
+        include_if_exists(&mut build, idf_path.join(dir));
+    }
+
+    build.compile("yd_hw");
+}

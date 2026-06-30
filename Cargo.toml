@@ -1,0 +1,26 @@
+[package]
+name = "yd_esp32_s3_audio_sd"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.77"
+
+[dependencies]
+anyhow = "1"
+esp-idf-svc = "0.52.1"
+esp-idf-sys = { version = "0.37.2", features = ["binstart"] }
+log = "0.4"
+
+[build-dependencies]
+cc = "1"
+embuild = "0.33"
+
+[profile.release]
+codegen-units = 1
+debug = 1
+lto = "fat"
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = 1
