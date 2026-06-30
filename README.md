@@ -46,12 +46,14 @@ Alle zentralen Werte stehen in `src/config.rs`.
 - `PLAYBACK_EXTREME_LOUDNESS`, `PLAYBACK_HARD_CLIP`, `PLAYBACK_PREEMPHASIS`, `PLAYBACK_NOISE_SHAPING`: machen Playback lauter und verständlicher, aber auch rauer.
 - `MIC_MODE = 4`: pseudo-differenziell, GPIO4 ADC minus GPIO5 ADC. Das ist der aktuelle Default.
 - `MIC_MODE = 5`: Auto-Scan der Modi 0..4 vor jeder Aufnahme, mit Log-Tabelle und Score.
-- `RECORD_ADC_ATTEN_MODE = 0`: `ADC_ATTEN_DB_0`, empfindlichster ADC-Bereich für sehr kleine Lautsprecher-Mikrofon-Signale.
+- `RECORD_ADC_ATTEN_MODE = 2`: `ADC_ATTEN_DB_6`, aktueller Default. `ADC_ATTEN_DB_0` war zu empfindlich, wenn `raw_a`/`raw_b` im Log oft 0 und 4095 erreichen.
 - `RECORD_TO_RAM_FIRST = true`: während der Aufnahme wird nur in RAM geschrieben; erst nach Stop wird die WAV-Datei auf SD geschrieben. Das reduziert SD-/SPI-Störungen im ADC-Sampling.
+- Wenn `RECORD STATS` eine hohe `saturation_percent` zeigt, teste eine höhere Attenuation: `RECORD_ADC_ATTEN_MODE = 2` oder `3`.
+- Wenn `gate_open_percent` unter 1% bleibt, ist das Gate noch zu streng oder das Signal zu schwach. Dann `NOISE_GATE_MULTIPLIER` weiter senken oder lauter/direkter in den Lautsprecher sprechen.
 
 Empfohlene Tests:
 
-1. Erst mit `MIC_MODE = 4`, `RECORD_ADC_ATTEN_MODE = 0`, `RECORD_TO_RAM_FIRST = true` testen.
+1. Erst mit `MIC_MODE = 4`, `RECORD_ADC_ATTEN_MODE = 2`, `RECORD_TO_RAM_FIRST = true` testen.
 2. Danach `MIC_MODE = 5` testen und im Monitor die `MIC_SCAN`-Scores vergleichen.
 3. Auf die Lautsprechermembran klopfen und eine kurze Aufnahme speichern.
 4. Sehr laut und direkt vor dem Lautsprecher sprechen.

@@ -192,6 +192,10 @@ static int yd_adc_config_channel(adc_channel_t channel) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (*configured) {
+        return ESP_OK;
+    }
+
     adc_oneshot_chan_cfg_t chan_cfg = {
         .atten = s_adc_atten,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
@@ -215,6 +219,8 @@ int yd_audio_record_prepare_mode(uint8_t mic_mode) {
 int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode) {
     yd_pwm_stop();
     s_adc_atten = yd_adc_atten_from_mode(atten_mode);
+    s_adc_ch3_configured = false;
+    s_adc_ch4_configured = false;
 
     // Der S3 hat hier keinen nutzbaren differenziellen ADC. Der Lautsprecher
     // liefert als Mikrofon ohne Bias/Vorverstaerker nur ein sehr kleines Signal.

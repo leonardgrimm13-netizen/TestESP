@@ -5,6 +5,8 @@ use log::{info, warn};
 use std::fs::OpenOptions;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::thread;
+use std::time::Duration;
 
 const SAMPLE_PERIOD_US: u64 = 1_000_000 / config::RECORD_SAMPLE_RATE as u64;
 const RECORD_HIGHPASS_ALPHA: f32 = 0.94;
@@ -12,6 +14,9 @@ const RECORD_LOWPASS_ALPHA: f32 = 0.45;
 const PLAYBACK_HIGHPASS_ALPHA: f32 = 0.997;
 const PLAYBACK_LOWPASS_ALPHA: f32 = 0.78;
 const PLAYBACK_RMS_TARGET: f32 = 0.58;
+const YIELD_EVERY_SAMPLES: usize = 128;
+const ADC_SATURATION_LOW: i32 = 8;
+const ADC_SATURATION_HIGH: i32 = 4087;
 
 pub fn log_build_config() {
     info!(
@@ -109,6 +114,11 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
                 }
             }
         }
+
+        if processed.len() % YIELD_EVERY_SAMPLES == 0 {
+            scheduler_yield();
+            next_sample = hw::micros().wrapping_add(SAMPLE_PERIOD_US);
+        }
     }
 
     hw::audio_idle().ok();
@@ -120,6 +130,12 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
     } else {
         stats.gate_open_samples as f32 * 100.0 / stats.samples as f32
     };
+    let saturation_percent = if stats.samples == 0 {
+        0.0
+    } else {
+        stats.saturation_sample_count as f32 * 100.0 / stats.samples as f32
+    };
+    let gate_threshold = processor.noise_threshold;
 
     let write_start_ms = hw::millis();
     write_wav_file(path, &processed)?;
@@ -134,7 +150,7 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
         config::RECORD_TO_RAM_FIRST
     );
     info!(
-        "RECORD STATS mode={} atten={} samples={} raw_a_min={} raw_a_max={} raw_b_min={} raw_b_max={} diff_min={} diff_max={} diff_p2p={} dc_offset={:.2} noise_floor={:.2} gate_open_samples={} gate_open_percent={:.1} final_gain={:.2} clipped_samples={} sd_write_time_ms={} ram_first={}",
+        "RECORD STATS mode={} atten={} samples={} raw_a_min={} raw_a_max={} raw_b_min={} raw_b_max={} diff_min={} diff_max={} diff_p2p={} dc_offset={:.2} noise_floor={:.2} gate_threshold={:.2} gate_open_samples={} gate_open_percent={:.1} final_gain={:.2} clipped_samples={} saturation_a_count={} saturation_b_count={} saturation_percent={:.2} sd_write_time_ms={} ram_first={}",
         stats.mode,
         adc_atten_description(config::RECORD_ADC_ATTEN_MODE),
         stats.samples,
@@ -147,13 +163,23 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
         stats.diff_max - stats.diff_min,
         stats.dc_offset,
         stats.noise_floor,
+        gate_threshold,
         stats.gate_open_samples,
         gate_percent,
         stats.final_gain,
         stats.clipped_samples,
+        stats.saturation_a_count,
+        stats.saturation_b_count,
+        saturation_percent,
         write_time_ms,
         config::RECORD_TO_RAM_FIRST
     );
+    if saturation_percent > 1.0 {
+        warn!("RECORD RECOMMENDATION ADC saturation high: try higher RECORD_ADC_ATTEN_MODE");
+    }
+    if gate_percent < 1.0 {
+        warn!("RECORD RECOMMENDATION Gate too strict or signal too weak: lower NOISE_GATE_MULTIPLIER or speak louder");
+    }
 
     Ok(processed.len() as u32)
 }
@@ -280,7 +306,7 @@ pub fn play_wav_blocking(path: &Path) -> Result<()> {
             wait_until(next_sample);
             next_sample = next_sample.wrapping_add(period_us);
             hw::pwm_set_sample(out)?;
-            stats.output_samples += 1;
+            stats.observe_output(processed, out);
         }
 
         remaining_frames -= samples.len();
@@ -288,10 +314,14 @@ pub fn play_wav_blocking(path: &Path) -> Result<()> {
 
     hw::pwm_stop().ok();
     info!(
-        "PLAYBACK END samples={} input_peak={} input_rms={:.3} min_gain={:.2} max_gain={:.2} avg_gain={:.2} limiter_active={} clipped_samples={}",
+        "PLAYBACK END samples={} input_peak={} input_rms={:.3} output_peak={:.3} output_rms={:.3} pwm_min={} pwm_max={} min_gain={:.2} max_gain={:.2} avg_gain={:.2} limiter_active={} clipped_samples={}",
         stats.output_samples,
         stats.input_peak,
         stats.input_rms,
+        stats.output_peak,
+        stats.output_rms(),
+        stats.pwm_min,
+        stats.pwm_max,
         stats.min_gain,
         stats.max_gain,
         stats.average_gain(),
@@ -307,10 +337,14 @@ fn calibrate_mic(mode: u8) -> Result<Calibration> {
     let mut samples = Vec::with_capacity(count);
     let mut next_sample = hw::micros();
 
-    for _ in 0..count {
+    for index in 0..count {
         wait_until(next_sample);
         next_sample = next_sample.wrapping_add(SAMPLE_PERIOD_US);
         samples.push(read_oversampled_raw(mode)?);
+        if (index + 1) % YIELD_EVERY_SAMPLES == 0 {
+            scheduler_yield();
+            next_sample = hw::micros().wrapping_add(SAMPLE_PERIOD_US);
+        }
     }
 
     Ok(Calibration::from_samples(&samples))
@@ -321,18 +355,20 @@ fn scan_mode_metrics(mode: u8, ms: u32) -> Result<ScanMetrics> {
     let mut samples = Vec::with_capacity(count);
     let mut next_sample = hw::micros();
 
-    for _ in 0..count {
+    for index in 0..count {
         wait_until(next_sample);
         next_sample = next_sample.wrapping_add(SAMPLE_PERIOD_US);
         samples.push(read_oversampled_raw(mode)?);
+        if (index + 1) % YIELD_EVERY_SAMPLES == 0 {
+            scheduler_yield();
+            next_sample = hw::micros().wrapping_add(SAMPLE_PERIOD_US);
+        }
     }
 
     let cal = Calibration::from_samples(&samples);
     let saturation_count = samples
         .iter()
-        .filter(|sample| {
-            sample.raw_a <= 8 || sample.raw_a >= 4087 || sample.raw_b <= 8 || sample.raw_b >= 4087
-        })
+        .filter(|sample| is_saturated(sample.raw_a) || is_saturated(sample.raw_b))
         .count() as u32;
 
     Ok(ScanMetrics {
@@ -527,6 +563,14 @@ fn wait_until(target_us: u64) {
     }
 }
 
+fn scheduler_yield() {
+    thread::sleep(Duration::from_millis(1));
+}
+
+fn is_saturated(raw: i32) -> bool {
+    raw <= ADC_SATURATION_LOW || raw >= ADC_SATURATION_HIGH
+}
+
 fn raw_to_debug_u8(raw: i32) -> u8 {
     (raw.clamp(0, 4095) >> 4) as u8
 }
@@ -657,6 +701,9 @@ struct RecordStats {
     final_gain: f32,
     gate_open_samples: u32,
     clipped_samples: u32,
+    saturation_a_count: u32,
+    saturation_b_count: u32,
+    saturation_sample_count: u32,
     written_bytes: u32,
 }
 
@@ -676,6 +723,9 @@ impl RecordStats {
             final_gain: config::RECORD_INITIAL_GAIN,
             gate_open_samples: 0,
             clipped_samples: 0,
+            saturation_a_count: 0,
+            saturation_b_count: 0,
+            saturation_sample_count: 0,
             written_bytes: 0,
         }
     }
@@ -688,6 +738,17 @@ impl RecordStats {
         self.raw_b_max = self.raw_b_max.max(raw.raw_b);
         self.diff_min = self.diff_min.min(raw.signal);
         self.diff_max = self.diff_max.max(raw.signal);
+        let saturated_a = is_saturated(raw.raw_a);
+        let saturated_b = is_saturated(raw.raw_b);
+        if saturated_a {
+            self.saturation_a_count += 1;
+        }
+        if saturated_b {
+            self.saturation_b_count += 1;
+        }
+        if saturated_a || saturated_b {
+            self.saturation_sample_count += 1;
+        }
     }
 }
 
@@ -854,6 +915,10 @@ struct PlaybackStats {
     input_peak: i32,
     input_rms: f32,
     output_samples: u32,
+    output_peak: f32,
+    output_sum_sq: f64,
+    pwm_min: u8,
+    pwm_max: u8,
     clipped_samples: u32,
     min_gain: f32,
     max_gain: f32,
@@ -867,6 +932,10 @@ impl PlaybackStats {
             input_peak,
             input_rms,
             output_samples: 0,
+            output_peak: 0.0,
+            output_sum_sq: 0.0,
+            pwm_min: u8::MAX,
+            pwm_max: u8::MIN,
             clipped_samples: 0,
             min_gain: f32::MAX,
             max_gain: 0.0,
@@ -882,11 +951,27 @@ impl PlaybackStats {
         self.gain_blocks += 1;
     }
 
+    fn observe_output(&mut self, sample: f32, pwm: u8) {
+        self.output_samples += 1;
+        self.output_peak = self.output_peak.max(sample.abs());
+        self.output_sum_sq += (sample as f64) * (sample as f64);
+        self.pwm_min = self.pwm_min.min(pwm);
+        self.pwm_max = self.pwm_max.max(pwm);
+    }
+
     fn average_gain(&self) -> f32 {
         if self.gain_blocks == 0 {
             0.0
         } else {
             self.gain_sum / self.gain_blocks as f32
+        }
+    }
+
+    fn output_rms(&self) -> f32 {
+        if self.output_samples == 0 {
+            0.0
+        } else {
+            (self.output_sum_sq / self.output_samples as f64).sqrt() as f32
         }
     }
 }

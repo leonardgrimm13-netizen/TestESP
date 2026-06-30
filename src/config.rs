@@ -37,22 +37,22 @@ pub const RECORD_MAX_SECONDS: u32 = 30;
 /// 2 = ADC_ATTEN_DB_6
 /// 3 = ADC_ATTEN_DB_12, groesster Spannungsbereich, aber fuer Mikrofonversuch
 ///     meist zu unempfindlich
-pub const RECORD_ADC_ATTEN_MODE: u8 = 0;
+pub const RECORD_ADC_ATTEN_MODE: u8 = 2;
 
 /// Kleinste und groesste erlaubte Aufnahme-AGC.
 pub const RECORD_GAIN_MIN: f32 = 1.0;
-pub const RECORD_GAIN_MAX: f32 = 32.0;
-pub const RECORD_INITIAL_GAIN: f32 = 8.0;
+pub const RECORD_GAIN_MAX: f32 = 64.0;
+pub const RECORD_INITIAL_GAIN: f32 = 12.0;
 
 /// Zielpegel nach Gate/Filter in 8-bit signed Einheiten.
 pub const RECORD_TARGET_LEVEL: f32 = 92.0;
 
 /// Noise-Gate-Schwelle relativ zur gemessenen mittleren absoluten Abweichung.
-pub const NOISE_GATE_MULTIPLIER: f32 = 3.5;
+pub const NOISE_GATE_MULTIPLIER: f32 = 1.25;
 
 /// Unterhalb der Gate-Schwelle wird nicht hart stummgeschaltet, sondern nur
 /// abgesenkt, damit Sprache nicht komplett zerhackt wird.
-pub const NOISE_GATE_ATTENUATION: f32 = 0.05;
+pub const NOISE_GATE_ATTENUATION: f32 = 0.25;
 
 /// Mic-Modus:
 /// 0 = GPIO4 ADC, GPIO5 Pulldown
@@ -88,13 +88,13 @@ pub const PLAYBACK_PREEMPHASIS: bool = true;
 pub const PLAYBACK_NOISE_SHAPING: bool = true;
 
 /// Fester Wiedergabe-Gain vor Auto-Normalisierung und Kompressor.
-pub const PLAYBACK_GAIN: f32 = 4.0;
+pub const PLAYBACK_GAIN: f32 = 8.0;
 
 /// Pro Block wird der Peak gesucht und bei kleinen Pegeln automatisch
 /// angehoben. Das macht leise WAVs deutlich lauter.
 pub const PLAYBACK_AUTO_NORMALIZE: bool = true;
 pub const PLAYBACK_AUTO_TARGET: f32 = 0.92;
-pub const PLAYBACK_AUTO_GAIN_MAX: f32 = 8.0;
+pub const PLAYBACK_AUTO_GAIN_MAX: f32 = 24.0;
 
 /// Einfacher Sprach-Kompressor/Limiter. Erhoeht wahrgenommene Lautheit, kann
 /// aber Verzerrungen erzeugen, wenn das Quellmaterial schon stark clipped.
