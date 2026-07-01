@@ -60,10 +60,12 @@ pub const NOISE_GATE_ATTENUATION: f32 = 0.25;
 /// 2 = GPIO4 ADC, GPIO5 Pullup
 /// 3 = GPIO5 ADC, GPIO4 Pulldown (ESP32-S3 GPIO5 ist ADC1_CH4)
 /// 4 = PSEUDO_DIFF: GPIO4 ADC minus GPIO5 ADC, beide hochohmig
-/// 5 = AUTO_SCAN: Modi 0..7 kurz messen und besten Modus waehlen
+/// 5 = AUTO_SCAN: Modi 0..7 kurz messen und besten Modus waehlen.
+///     Nur fuer Diagnose/Tests gedacht; wenn er Mode 4 waehlt, fuer normale
+///     Nutzung wieder MIC_MODE=4 setzen, damit der Start ohne Scan-Delay laeuft.
 /// 6 = BIASED_DIFF_INTERNAL_PULLS: GPIO4 Pullup, GPIO5 Pulldown
 /// 7 = REVERSE_BIASED_DIFF_INTERNAL_PULLS: GPIO4 Pulldown, GPIO5 Pullup
-pub const MIC_MODE: u8 = 5;
+pub const MIC_MODE: u8 = 4;
 
 /// Optionales Roh-WAV zum Debuggen. Standard aus, damit die SD-Karte nicht
 /// unnoetig vollgeschrieben wird.

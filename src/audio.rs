@@ -193,6 +193,9 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
 }
 
 pub fn mic_mode_scan() -> Result<u8> {
+    warn!(
+        "MIC_MODE=5 Auto-Scan is diagnostic and adds delay; set MIC_MODE=4 for normal use if it is selected."
+    );
     info!(
         "MIC_SCAN start atten={} test_ms=250 oversample={}",
         adc_atten_description(config::RECORD_ADC_ATTEN_MODE),
