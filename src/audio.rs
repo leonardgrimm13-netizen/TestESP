@@ -54,7 +54,7 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
         selected_mode,
         mic_mode_description(selected_mode),
         adc_atten_description(config::RECORD_ADC_ATTEN_MODE),
-        selected_mode == 4,
+        is_diff_mode(selected_mode),
         config::RECORD_TO_RAM_FIRST
     );
 
@@ -130,11 +130,9 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
     } else {
         stats.gate_open_samples as f32 * 100.0 / stats.samples as f32
     };
-    let saturation_percent = if stats.samples == 0 {
-        0.0
-    } else {
-        stats.saturation_sample_count as f32 * 100.0 / stats.samples as f32
-    };
+    let low_saturation_percent = percent(stats.low_saturation_sample_count, stats.samples);
+    let high_saturation_percent = percent(stats.high_saturation_sample_count, stats.samples);
+    let total_saturation_percent = percent(stats.saturation_sample_count, stats.samples);
     let gate_threshold = processor.noise_threshold;
 
     let write_start_ms = hw::millis();
@@ -150,7 +148,7 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
         config::RECORD_TO_RAM_FIRST
     );
     info!(
-        "RECORD STATS mode={} atten={} samples={} raw_a_min={} raw_a_max={} raw_b_min={} raw_b_max={} diff_min={} diff_max={} diff_p2p={} dc_offset={:.2} noise_floor={:.2} gate_threshold={:.2} gate_open_samples={} gate_open_percent={:.1} final_gain={:.2} clipped_samples={} saturation_a_count={} saturation_b_count={} saturation_percent={:.2} sd_write_time_ms={} ram_first={}",
+        "RECORD STATS mode={} atten={} samples={} raw_a_min={} raw_a_max={} raw_b_min={} raw_b_max={} diff_min={} diff_max={} diff_p2p={} dc_offset={:.2} noise_floor={:.2} gate_threshold={:.2} gate_open_samples={} gate_open_percent={:.1} final_gain={:.2} clipped_samples={} saturation_low_a_count={} saturation_high_a_count={} saturation_low_b_count={} saturation_high_b_count={} saturation_low_percent={:.2} saturation_high_percent={:.2} saturation_total_percent={:.2} sd_write_time_ms={} ram_first={}",
         stats.mode,
         adc_atten_description(config::RECORD_ADC_ATTEN_MODE),
         stats.samples,
@@ -168,14 +166,24 @@ pub fn record_until_short_press(path: &Path, button: &mut DebouncedButton) -> Re
         gate_percent,
         stats.final_gain,
         stats.clipped_samples,
-        stats.saturation_a_count,
-        stats.saturation_b_count,
-        saturation_percent,
+        stats.saturation_low_a_count,
+        stats.saturation_high_a_count,
+        stats.saturation_low_b_count,
+        stats.saturation_high_b_count,
+        low_saturation_percent,
+        high_saturation_percent,
+        total_saturation_percent,
         write_time_ms,
         config::RECORD_TO_RAM_FIRST
     );
-    if saturation_percent > 1.0 {
-        warn!("RECORD RECOMMENDATION ADC saturation high: try higher RECORD_ADC_ATTEN_MODE");
+    if high_saturation_percent > 1.0 {
+        warn!("RECORD RECOMMENDATION ADC high clipping: try higher RECORD_ADC_ATTEN_MODE");
+    }
+    if low_saturation_percent > 10.0 && high_saturation_percent < 1.0 {
+        warn!("RECORD RECOMMENDATION ADC low clipping / missing bias: try MIC_MODE 2, MIC_MODE 3 or MIC_MODE 5");
+    }
+    if stats.raw_a_max.max(stats.raw_b_max) < 800 && low_saturation_percent > 10.0 {
+        warn!("RECORD RECOMMENDATION signal is near ground; pseudo-diff high-z has poor bias");
     }
     if gate_percent < 1.0 {
         warn!("RECORD RECOMMENDATION Gate too strict or signal too weak: lower NOISE_GATE_MULTIPLIER or speak louder");
@@ -194,12 +202,30 @@ pub fn mic_mode_scan() -> Result<u8> {
     let mut best_mode = 4_u8;
     let mut best_score = f32::MIN;
 
-    for mode in 0_u8..=4 {
+    for mode in 0_u8..=7 {
+        if mode == 5 {
+            info!(
+                "MIC_SCAN mode={} desc=\"{}\" raw_a_min=0 raw_a_max=0 raw_b_min=0 raw_b_max=0 diff_p2p=0 noise=0.00 low_sat=0.00 high_sat=0.00 gate_open_est=0.0 score=-9999.00 skipped=true reason=\"auto-scan selector, not a physical ADC mode\"",
+                mode,
+                mic_mode_description(mode)
+            );
+            continue;
+        }
+
         hw::prepare_recording(mode, config::RECORD_ADC_ATTEN_MODE)?;
         let metrics = scan_mode_metrics(mode, 250)?;
-        let saturation_penalty = metrics.saturation_count as f32 * 0.25;
-        let signal_score = metrics.p2p as f32 / (metrics.noise_floor + 1.0);
-        let score = signal_score - saturation_penalty;
+        let signal_score = metrics.diff_p2p as f32 / (metrics.noise_floor + 1.0);
+        let gate_score = metrics.gate_open_estimate_percent * 0.20;
+        let high_penalty = metrics.high_saturation_percent * 3.0;
+        let low_penalty = metrics.low_saturation_percent * 0.35;
+        let near_ground_penalty = if metrics.raw_a_max.max(metrics.raw_b_max) < 800
+            && metrics.low_saturation_percent > 10.0
+        {
+            metrics.low_saturation_percent * 0.50
+        } else {
+            0.0
+        };
+        let score = signal_score + gate_score - high_penalty - low_penalty - near_ground_penalty;
 
         if score > best_score {
             best_score = score;
@@ -207,12 +233,18 @@ pub fn mic_mode_scan() -> Result<u8> {
         }
 
         info!(
-            "MIC_SCAN mode={} desc=\"{}\" noise={:.2} p2p={} saturation_count={} score={:.2}",
+            "MIC_SCAN mode={} desc=\"{}\" raw_a_min={} raw_a_max={} raw_b_min={} raw_b_max={} diff_p2p={} noise={:.2} low_sat={:.2} high_sat={:.2} gate_open_est={:.1} score={:.2}",
             mode,
             mic_mode_description(mode),
+            metrics.raw_a_min,
+            metrics.raw_a_max,
+            metrics.raw_b_min,
+            metrics.raw_b_max,
+            metrics.diff_p2p,
             metrics.noise_floor,
-            metrics.p2p,
-            metrics.saturation_count,
+            metrics.low_saturation_percent,
+            metrics.high_saturation_percent,
+            metrics.gate_open_estimate_percent,
             score
         );
     }
@@ -366,15 +398,34 @@ fn scan_mode_metrics(mode: u8, ms: u32) -> Result<ScanMetrics> {
     }
 
     let cal = Calibration::from_samples(&samples);
-    let saturation_count = samples
-        .iter()
-        .filter(|sample| is_saturated(sample.raw_a) || is_saturated(sample.raw_b))
-        .count() as u32;
+    let mut low_saturation_count = 0_u32;
+    let mut high_saturation_count = 0_u32;
+    let mut gate_open_estimate_count = 0_u32;
+
+    for sample in &samples {
+        if is_low_saturated(sample.raw_a) || is_low_saturated(sample.raw_b) {
+            low_saturation_count += 1;
+        }
+        if is_high_saturated(sample.raw_a) || is_high_saturated(sample.raw_b) {
+            high_saturation_count += 1;
+        }
+        if (sample.signal as f32 - cal.dc_offset).abs()
+            >= cal.noise_floor * config::NOISE_GATE_MULTIPLIER
+        {
+            gate_open_estimate_count += 1;
+        }
+    }
 
     Ok(ScanMetrics {
+        raw_a_min: cal.raw_a_min,
+        raw_a_max: cal.raw_a_max,
+        raw_b_min: cal.raw_b_min,
+        raw_b_max: cal.raw_b_max,
         noise_floor: cal.noise_floor,
-        p2p: cal.diff_max - cal.diff_min,
-        saturation_count,
+        diff_p2p: cal.diff_max - cal.diff_min,
+        low_saturation_percent: percent(low_saturation_count, cal.samples),
+        high_saturation_percent: percent(high_saturation_count, cal.samples),
+        gate_open_estimate_percent: percent(gate_open_estimate_count, cal.samples),
     })
 }
 
@@ -404,7 +455,7 @@ fn read_oversampled_raw(mode: u8) -> Result<RawSample> {
 fn signal_from_pair(mode: u8, raw_a: i32, raw_b: i32) -> i32 {
     match mode {
         3 => raw_b,
-        4 => raw_a - raw_b,
+        4 | 6 | 7 => raw_a - raw_b,
         _ => raw_a,
     }
 }
@@ -567,8 +618,24 @@ fn scheduler_yield() {
     thread::sleep(Duration::from_millis(1));
 }
 
-fn is_saturated(raw: i32) -> bool {
-    raw <= ADC_SATURATION_LOW || raw >= ADC_SATURATION_HIGH
+fn is_low_saturated(raw: i32) -> bool {
+    raw <= ADC_SATURATION_LOW
+}
+
+fn is_high_saturated(raw: i32) -> bool {
+    raw >= ADC_SATURATION_HIGH
+}
+
+fn percent(count: u32, total: u32) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        count as f32 * 100.0 / total as f32
+    }
+}
+
+fn is_diff_mode(mode: u8) -> bool {
+    matches!(mode, 4 | 6 | 7)
 }
 
 fn raw_to_debug_u8(raw: i32) -> u8 {
@@ -586,7 +653,9 @@ fn mic_mode_description(mode: u8) -> &'static str {
         2 => "GPIO4 ADC, GPIO5 schwacher Pullup",
         3 => "GPIO5 ADC, GPIO4 schwacher Pulldown",
         4 => "PSEUDO_DIFF GPIO4 ADC minus GPIO5 ADC, beide High-Z",
-        5 => "AUTO_SCAN Modi 0..4",
+        5 => "AUTO_SCAN Modi 0..7",
+        6 => "BIASED_DIFF_INTERNAL_PULLS GPIO4 Pullup, GPIO5 Pulldown",
+        7 => "REVERSE_BIASED_DIFF_INTERNAL_PULLS GPIO4 Pulldown, GPIO5 Pullup",
         _ => "ungueltig",
     }
 }
@@ -682,9 +751,15 @@ impl Calibration {
 }
 
 struct ScanMetrics {
+    raw_a_min: i32,
+    raw_a_max: i32,
+    raw_b_min: i32,
+    raw_b_max: i32,
     noise_floor: f32,
-    p2p: i32,
-    saturation_count: u32,
+    diff_p2p: i32,
+    low_saturation_percent: f32,
+    high_saturation_percent: f32,
+    gate_open_estimate_percent: f32,
 }
 
 struct RecordStats {
@@ -701,8 +776,12 @@ struct RecordStats {
     final_gain: f32,
     gate_open_samples: u32,
     clipped_samples: u32,
-    saturation_a_count: u32,
-    saturation_b_count: u32,
+    saturation_low_a_count: u32,
+    saturation_high_a_count: u32,
+    saturation_low_b_count: u32,
+    saturation_high_b_count: u32,
+    low_saturation_sample_count: u32,
+    high_saturation_sample_count: u32,
     saturation_sample_count: u32,
     written_bytes: u32,
 }
@@ -723,8 +802,12 @@ impl RecordStats {
             final_gain: config::RECORD_INITIAL_GAIN,
             gate_open_samples: 0,
             clipped_samples: 0,
-            saturation_a_count: 0,
-            saturation_b_count: 0,
+            saturation_low_a_count: 0,
+            saturation_high_a_count: 0,
+            saturation_low_b_count: 0,
+            saturation_high_b_count: 0,
+            low_saturation_sample_count: 0,
+            high_saturation_sample_count: 0,
             saturation_sample_count: 0,
             written_bytes: 0,
         }
@@ -738,15 +821,30 @@ impl RecordStats {
         self.raw_b_max = self.raw_b_max.max(raw.raw_b);
         self.diff_min = self.diff_min.min(raw.signal);
         self.diff_max = self.diff_max.max(raw.signal);
-        let saturated_a = is_saturated(raw.raw_a);
-        let saturated_b = is_saturated(raw.raw_b);
-        if saturated_a {
-            self.saturation_a_count += 1;
+        let low_a = is_low_saturated(raw.raw_a);
+        let high_a = is_high_saturated(raw.raw_a);
+        let low_b = is_low_saturated(raw.raw_b);
+        let high_b = is_high_saturated(raw.raw_b);
+
+        if low_a {
+            self.saturation_low_a_count += 1;
         }
-        if saturated_b {
-            self.saturation_b_count += 1;
+        if high_a {
+            self.saturation_high_a_count += 1;
         }
-        if saturated_a || saturated_b {
+        if low_b {
+            self.saturation_low_b_count += 1;
+        }
+        if high_b {
+            self.saturation_high_b_count += 1;
+        }
+        if low_a || low_b {
+            self.low_saturation_sample_count += 1;
+        }
+        if high_a || high_b {
+            self.high_saturation_sample_count += 1;
+        }
+        if low_a || high_a || low_b || high_b {
             self.saturation_sample_count += 1;
         }
     }

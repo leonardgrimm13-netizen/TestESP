@@ -234,6 +234,7 @@ int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode) {
     adc_channel_t channel = ADC_CHANNEL_3; // GPIO4 auf ESP32-S3.
     uint64_t adc_pin_mask = 1ULL << PIN_AUDIO_A;
     bool pair_mode = false;
+    bool biased_pair_mode = false;
 
     switch (mic_mode) {
         case 0:
@@ -271,6 +272,22 @@ int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode) {
             adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
             pair_mode = true;
             break;
+        case 6:
+            // Schwacher interner Bias-Versuch ohne externe Bauteile:
+            // GPIO4 Pullup, GPIO5 Pulldown, beide bleiben ADC-Inputs.
+            channel = ADC_CHANNEL_3;
+            adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
+            pair_mode = true;
+            biased_pair_mode = true;
+            break;
+        case 7:
+            // Umgekehrter Bias-Versuch zum Vergleich:
+            // GPIO4 Pulldown, GPIO5 Pullup, beide bleiben ADC-Inputs.
+            channel = ADC_CHANNEL_3;
+            adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
+            pair_mode = true;
+            biased_pair_mode = true;
+            break;
         default:
             return ESP_ERR_INVALID_ARG;
     }
@@ -287,16 +304,42 @@ int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode) {
         return err;
     }
 
-    gpio_config_t ref_cfg = {
-        .pin_bit_mask = 1ULL << ref_pin,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = pull_up,
-        .pull_down_en = pull_down,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    err = gpio_config(&ref_cfg);
-    if (err != ESP_OK) {
-        return err;
+    if (biased_pair_mode) {
+        gpio_config_t bias_a_cfg = {
+            .pin_bit_mask = 1ULL << PIN_AUDIO_A,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = mic_mode == 6 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            .pull_down_en = mic_mode == 7 ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&bias_a_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        gpio_config_t bias_b_cfg = {
+            .pin_bit_mask = 1ULL << PIN_AUDIO_B,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = mic_mode == 7 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            .pull_down_en = mic_mode == 6 ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&bias_b_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+    } else {
+        gpio_config_t ref_cfg = {
+            .pin_bit_mask = 1ULL << ref_pin,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = pull_up,
+            .pull_down_en = pull_down,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&ref_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
 
     s_adc_channel = channel;
