@@ -15,9 +15,9 @@
 
 ## Grenzen des Direktanschlusses
 
-Der 2-Pin-Lautsprecher ist elektrisch kein gutes Mikrofon. Ohne Vorverstärker und Bias-Schaltung liefert die Schwingspule nur ein sehr kleines, schlecht definiertes Signal. Der ESP32-S3 hat keinen echten differenziellen ADC für diese Anwendung. Deshalb nimmt dieses Projekt GPIO4 als ADC-Eingang und lässt GPIO5 hochohmig mit schwachem internem Pulldown als Referenz. In Software werden DC-Anteil, Rauschen und Pegel mit Hochpass und einfacher AGC nachgeführt. Das ist die bestmögliche direkte Lösung ohne externe Bauteile, ersetzt aber kein Mikrofonmodul.
+Der 2-Pin-Lautsprecher ist elektrisch kein gutes Mikrofon. Ohne Vorverstärker und Bias-Schaltung liefert die Schwingspule nur ein sehr kleines, schlecht definiertes Signal. Der ESP32-S3 hat keinen echten differenziellen ADC für diese Anwendung. Dieses Projekt nutzt deshalb als besten Software-Versuch eine pseudo-differenzielle Messung: GPIO4 und GPIO5 werden nacheinander per ADC gelesen und in Rust als Differenz ausgewertet. Das ersetzt kein Mikrofonmodul und keinen Vorverstärker.
 
-Bei der Wiedergabe treiben GPIO4 und GPIO5 den Lautsprecher per LEDC-PWM im Gegentakt. Die PWM-Amplitude wird begrenzt, damit die Pins nicht dauerhaft mit extremen Tastgraden gegeneinander arbeiten. Ein kleiner Audioverstärker ist für Lautstärke und Pin-Schutz trotzdem dringend empfohlen.
+Bei der Wiedergabe treiben GPIO4 und GPIO5 den Lautsprecher per LEDC-PWM im Gegentakt. Software kann keine zusätzliche elektrische Leistung erzeugen. Gain, Normalisierung, Kompression und Clipping können nur den vorhandenen PWM-/GPIO-Bereich aggressiver ausnutzen, wodurch das Signal lauter und rauer wirkt. Ein direkt am GPIO betriebener Lautsprecher kann den ESP belasten; dieses Projekt setzt trotzdem keine zusätzlichen Bauteile voraus.
 
 ## Verhalten
 
@@ -33,7 +33,59 @@ Bei der Wiedergabe treiben GPIO4 und GPIO5 den Lautsprecher per LEDC-PWM im Gege
 - Mono
 - PCM
 - Aufnahme: 8-bit unsigned
-- Wiedergabe: 8-bit unsigned und 16-bit signed PCM mono
+- Wiedergabe: 8-bit unsigned und 16-bit signed PCM, Mono oder Stereo-zu-Mono
+
+## Audio-Profile testen
+
+Alle zentralen Werte stehen in `src/config.rs`.
+
+- `PLAYBACK_OUTPUT_MODE = 0`: normaler LEDC-Gegentakt mit 62.5 kHz PWM.
+- `PLAYBACK_OUTPUT_MODE = 1`: `MAX_LOUD_LEDC`, aggressiv komprimiert/geclippt mit 31.25 kHz PWM. Das ist der aktuelle Default.
+- `PLAYBACK_OUTPUT_MODE = 2`: experimenteller SDM/PDM-Wunschmodus. Wenn der ESP-IDF-5.2.3-SDM-Treiber im aktuellen Build nicht sauber verfügbar ist, fällt die native Schicht automatisch auf Mode 1 zurück.
+- `PLAYBACK_PWM_FREQ_MODE = 0/1/2`: 62.5 kHz, 31.25 kHz oder sehr experimentell 15.625 kHz. Niedrigere Frequenzen koennen lauter wirken, aber PWM-Pfeifen hörbarer machen.
+- `PLAYBACK_EXTREME_LOUDNESS`, `PLAYBACK_HARD_CLIP`, `PLAYBACK_PREEMPHASIS`, `PLAYBACK_NOISE_SHAPING`: machen Playback lauter und verständlicher, aber auch rauer.
+- `MIC_MODE = 4`: pseudo-differenziell, GPIO4 ADC minus GPIO5 ADC, beide Pins hochohmig. Das ist nach den bisherigen Tests der beste Alltagsmodus.
+- `MIC_MODE = 5`: Auto-Scan der Modi 0..7 vor jeder Aufnahme, mit Log-Tabelle und Score. Mode 5 ist nur fuer Test/Diagnose gedacht. Wenn der Auto-Scan Mode 4 auswaehlt, fuer normale Nutzung `MIC_MODE = 4` setzen, damit die Aufnahme ohne Scan-Delay startet. Mode 5 selbst ist dabei nur der Auto-Scan-Selector und wird im `MIC_SCAN`-Log als nicht-physischer ADC-Modus uebersprungen.
+- `MIC_MODE = 6`: `BIASED_DIFF_INTERNAL_PULLS`, GPIO4 Pullup und GPIO5 Pulldown, beide bleiben ADC-Inputs.
+- `MIC_MODE = 7`: `REVERSE_BIASED_DIFF_INTERNAL_PULLS`, GPIO4 Pulldown und GPIO5 Pullup.
+- Die internen Pullups/Pulldowns sind schwach und ungenau. Sie ersetzen keine Bias-Schaltung, sind aber ohne zusätzliche Bauteile der beste Software-/GPIO-Versuch gegen Low-Clipping nahe GND.
+- `RECORD_ADC_ATTEN_MODE = 2`: `ADC_ATTEN_DB_6`, aktueller Default. `ADC_ATTEN_DB_0` war zu empfindlich, wenn `raw_a`/`raw_b` im Log oft 0 und 4095 erreichen.
+- `RECORD_TO_RAM_FIRST = true`: während der Aufnahme wird nur in RAM geschrieben; erst nach Stop wird die WAV-Datei auf SD geschrieben. Das reduziert SD-/SPI-Störungen im ADC-Sampling.
+- Wenn `RECORD STATS` eine hohe `saturation_high_percent` zeigt, teste eine höhere Attenuation: `RECORD_ADC_ATTEN_MODE = 2` oder `3`.
+- Wenn `saturation_low_percent` hoch ist, aber `saturation_high_percent` niedrig bleibt, fehlt wahrscheinlich ein brauchbarer Arbeitspunkt. Dann `MIC_MODE = 2`, `3`, `5`, `6` oder `7` testen.
+- Hohe `saturation_low_percent` bei `saturation_high_percent = 0.00` bedeutet typischerweise Low-Clipping durch fehlenden Bias-Arbeitspunkt, nicht zu hohe ADC-Empfindlichkeit.
+- Interne Pullups/Pulldowns koennen als schwacher Bias-Versuch helfen, muessen aber nicht. Auf dem getesteten Board war Mode 4 besser als Mode 6/7.
+- Wenn `gate_open_percent` unter 1% bleibt, ist das Gate noch zu streng oder das Signal zu schwach. Dann `NOISE_GATE_MULTIPLIER` weiter senken oder lauter/direkter in den Lautsprecher sprechen.
+- Wenn die Aufnahme weiter stark rauscht, dumpf bleibt oder Sprache kaum verstaendlich wird, ist ohne echtes Mikrofon oder Vorverstaerker wahrscheinlich kaum noch Verbesserung moeglich.
+
+Empfohlen nach Tests:
+
+- `MIC_MODE = 4`
+- `RECORD_ADC_ATTEN_MODE = 2`
+- `RECORD_TO_RAM_FIRST = true`
+
+Empfohlene Tests:
+
+1. Fuer Alltag zuerst mit `MIC_MODE = 4`, `RECORD_ADC_ATTEN_MODE = 2`, `RECORD_TO_RAM_FIRST = true` testen.
+2. Nur fuer Diagnose `MIC_MODE = 5` setzen und im Monitor die `MIC_SCAN`-Scores fuer Modi 0..7 vergleichen.
+3. Auf die Lautsprechermembran klopfen und eine kurze Aufnahme speichern.
+4. Sehr laut und direkt vor dem Lautsprecher sprechen.
+5. Die WAV-Dateien von der SD-Karte am PC anhören.
+
+Erwartete Monitor-Ausgaben:
+
+- `AUDIO BUILD: playback_output_mode=...`
+- `AUDIO BUILD: mic_mode=... record_to_ram_first=... record_oversample=... adc_atten=...`
+- `RECORD START ...`
+- `RECORD MIC ...`
+- `RECORD CAL ...`
+- `RECORD WRITE ...`
+- `RECORD STATS ...`
+- `PLAYBACK START ...`
+- `PLAYBACK FORMAT ...`
+- `PLAYBACK DSP ...`
+- `PLAYBACK OUTPUT ...`
+- `PLAYBACK END ...`
 
 ## Build und Flash unter Linux
 
