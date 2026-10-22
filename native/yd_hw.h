@@ -19,11 +19,15 @@ void yd_led_off(void);
 
 int yd_audio_record_prepare(void);
 int yd_audio_record_prepare_mode(uint8_t mic_mode);
+int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode);
 int yd_audio_playback_prepare(void);
+int yd_audio_playback_prepare_mode(uint8_t mode);
+int yd_audio_playback_prepare_mode_freq(uint8_t mode, uint8_t pwm_freq_mode);
 int yd_audio_idle(void);
 
 int yd_adc_read_gpio4(int *raw);
 int yd_adc_read_active(int *raw);
+int yd_adc_read_pair(int *raw_a, int *raw_b);
 
 int yd_pwm_set_sample(uint8_t sample);
 int yd_pwm_stop(void);

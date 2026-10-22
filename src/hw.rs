@@ -11,11 +11,11 @@ extern "C" {
     fn yd_led_set_rgb(r: u8, g: u8, b: u8);
     fn yd_led_off();
 
-    fn yd_audio_record_prepare_mode(mic_mode: u8) -> i32;
-    fn yd_audio_playback_prepare() -> i32;
+    fn yd_audio_record_prepare_mode_atten(mic_mode: u8, atten_mode: u8) -> i32;
+    fn yd_audio_playback_prepare_mode_freq(mode: u8, pwm_freq_mode: u8) -> i32;
     fn yd_audio_idle() -> i32;
 
-    fn yd_adc_read_active(raw: *mut i32) -> i32;
+    fn yd_adc_read_pair(raw_a: *mut i32, raw_b: *mut i32) -> i32;
 
     fn yd_pwm_set_sample(sample: u8) -> i32;
     fn yd_pwm_stop() -> i32;
@@ -63,16 +63,16 @@ pub fn led_off() {
     unsafe { yd_led_off() }
 }
 
-pub fn prepare_recording(mic_mode: u8) -> Result<()> {
+pub fn prepare_recording(mic_mode: u8, atten_mode: u8) -> Result<()> {
     check(
-        unsafe { yd_audio_record_prepare_mode(mic_mode) },
+        unsafe { yd_audio_record_prepare_mode_atten(mic_mode, atten_mode) },
         "Audio-Aufnahme-Prepare",
     )
 }
 
-pub fn prepare_playback() -> Result<()> {
+pub fn prepare_playback(mode: u8, pwm_freq_mode: u8) -> Result<()> {
     check(
-        unsafe { yd_audio_playback_prepare() },
+        unsafe { yd_audio_playback_prepare_mode_freq(mode, pwm_freq_mode) },
         "Audio-Wiedergabe-Prepare",
     )
 }
@@ -81,13 +81,14 @@ pub fn audio_idle() -> Result<()> {
     check(unsafe { yd_audio_idle() }, "Audio-Idle")
 }
 
-pub fn adc_read() -> Result<i32> {
-    let mut raw = 0_i32;
+pub fn adc_read_pair() -> Result<(i32, i32)> {
+    let mut raw_a = 0_i32;
+    let mut raw_b = 0_i32;
     check(
-        unsafe { yd_adc_read_active(&mut raw as *mut i32) },
-        "ADC-Read active audio pin",
+        unsafe { yd_adc_read_pair(&mut raw_a as *mut i32, &mut raw_b as *mut i32) },
+        "ADC-Read GPIO4/GPIO5 pair",
     )?;
-    Ok(raw)
+    Ok((raw_a, raw_b))
 }
 
 pub fn pwm_set_sample(sample: u8) -> Result<()> {

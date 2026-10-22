@@ -25,7 +25,9 @@
 #define PIN_RGB GPIO_NUM_48
 
 #define SD_MOUNT_POINT "/sdcard"
-#define PWM_FREQ_HZ 62500
+#define PWM_FREQ_NORMAL_HZ 62500
+#define PWM_FREQ_MAX_LOUD_HZ 31250
+#define PWM_FREQ_VERY_EXPERIMENTAL_HZ 15625
 #define PWM_TIMER LEDC_TIMER_0
 #define PWM_MODE LEDC_LOW_SPEED_MODE
 #define PWM_CH_A LEDC_CHANNEL_0
@@ -39,7 +41,9 @@ static adc_oneshot_unit_handle_t s_adc1 = NULL;
 static bool s_adc_ch3_configured = false;
 static bool s_adc_ch4_configured = false;
 static adc_channel_t s_adc_channel = ADC_CHANNEL_3;
+static adc_atten_t s_adc_atten = ADC_ATTEN_DB_0;
 static bool s_pwm_ready = false;
+static uint32_t s_pwm_freq_hz = PWM_FREQ_NORMAL_HZ;
 
 int yd_hw_init_button(void) {
     gpio_config_t cfg = {
@@ -158,7 +162,22 @@ static int yd_adc_init_if_needed(void) {
     return ESP_OK;
 }
 
-static int yd_adc_config_channel_if_needed(adc_channel_t channel) {
+static adc_atten_t yd_adc_atten_from_mode(uint8_t atten_mode) {
+    switch (atten_mode) {
+        case 0:
+            return ADC_ATTEN_DB_0;
+        case 1:
+            return ADC_ATTEN_DB_2_5;
+        case 2:
+            return ADC_ATTEN_DB_6;
+        case 3:
+            return ADC_ATTEN_DB_12;
+        default:
+            return ADC_ATTEN_DB_0;
+    }
+}
+
+static int yd_adc_config_channel(adc_channel_t channel) {
     esp_err_t err = yd_adc_init_if_needed();
     if (err != ESP_OK) {
         return err;
@@ -178,7 +197,7 @@ static int yd_adc_config_channel_if_needed(adc_channel_t channel) {
     }
 
     adc_oneshot_chan_cfg_t chan_cfg = {
-        .atten = ADC_ATTEN_DB_12,
+        .atten = s_adc_atten,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
 
@@ -190,20 +209,32 @@ static int yd_adc_config_channel_if_needed(adc_channel_t channel) {
 }
 
 int yd_audio_record_prepare(void) {
-    return yd_audio_record_prepare_mode(0);
+    return yd_audio_record_prepare_mode_atten(0, 0);
 }
 
 int yd_audio_record_prepare_mode(uint8_t mic_mode) {
+    return yd_audio_record_prepare_mode_atten(mic_mode, 0);
+}
+
+int yd_audio_record_prepare_mode_atten(uint8_t mic_mode, uint8_t atten_mode) {
     yd_pwm_stop();
+    s_adc_atten = yd_adc_atten_from_mode(atten_mode);
+    s_adc_ch3_configured = false;
+    s_adc_ch4_configured = false;
 
     // Der S3 hat hier keinen nutzbaren differenziellen ADC. Der Lautsprecher
     // liefert als Mikrofon ohne Bias/Vorverstaerker nur ein sehr kleines Signal.
-    // Die Modi testen unterschiedliche schwache Referenz-Zustaende am zweiten
-    // Lautsprecherpin. Es wird bewusst kein Pin als starker Ausgang betrieben.
+    // Mode 4 liest GPIO4 und GPIO5 direkt nacheinander und bildet in Rust eine
+    // pseudo-differenzielle Differenz. Das ist kein echter differentieller ADC,
+    // aber der beste Software-Versuch ohne zusaetzliche Bauteile.
+    // Es wird bewusst kein Pin als starker Ausgang betrieben.
     gpio_num_t ref_pin = PIN_AUDIO_B;
     gpio_pullup_t pull_up = GPIO_PULLUP_DISABLE;
     gpio_pulldown_t pull_down = GPIO_PULLDOWN_ENABLE;
     adc_channel_t channel = ADC_CHANNEL_3; // GPIO4 auf ESP32-S3.
+    uint64_t adc_pin_mask = 1ULL << PIN_AUDIO_A;
+    bool pair_mode = false;
+    bool biased_pair_mode = false;
 
     switch (mic_mode) {
         case 0:
@@ -231,29 +262,99 @@ int yd_audio_record_prepare_mode(uint8_t mic_mode) {
             pull_up = GPIO_PULLUP_DISABLE;
             pull_down = GPIO_PULLDOWN_ENABLE;
             channel = ADC_CHANNEL_4;
+            adc_pin_mask = 1ULL << PIN_AUDIO_B;
+            break;
+        case 4:
+            ref_pin = PIN_AUDIO_B;
+            pull_up = GPIO_PULLUP_DISABLE;
+            pull_down = GPIO_PULLDOWN_DISABLE;
+            channel = ADC_CHANNEL_3;
+            adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
+            pair_mode = true;
+            break;
+        case 6:
+            // Schwacher interner Bias-Versuch ohne externe Bauteile:
+            // GPIO4 Pullup, GPIO5 Pulldown, beide bleiben ADC-Inputs.
+            channel = ADC_CHANNEL_3;
+            adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
+            pair_mode = true;
+            biased_pair_mode = true;
+            break;
+        case 7:
+            // Umgekehrter Bias-Versuch zum Vergleich:
+            // GPIO4 Pulldown, GPIO5 Pullup, beide bleiben ADC-Inputs.
+            channel = ADC_CHANNEL_3;
+            adc_pin_mask = (1ULL << PIN_AUDIO_A) | (1ULL << PIN_AUDIO_B);
+            pair_mode = true;
+            biased_pair_mode = true;
             break;
         default:
             return ESP_ERR_INVALID_ARG;
     }
 
-    gpio_config_t ref_cfg = {
-        .pin_bit_mask = 1ULL << ref_pin,
+    gpio_config_t adc_cfg = {
+        .pin_bit_mask = adc_pin_mask,
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = pull_up,
-        .pull_down_en = pull_down,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    esp_err_t err = gpio_config(&ref_cfg);
+    esp_err_t err = gpio_config(&adc_cfg);
     if (err != ESP_OK) {
         return err;
     }
 
+    if (biased_pair_mode) {
+        gpio_config_t bias_a_cfg = {
+            .pin_bit_mask = 1ULL << PIN_AUDIO_A,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = mic_mode == 6 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            .pull_down_en = mic_mode == 7 ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&bias_a_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+
+        gpio_config_t bias_b_cfg = {
+            .pin_bit_mask = 1ULL << PIN_AUDIO_B,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = mic_mode == 7 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+            .pull_down_en = mic_mode == 6 ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&bias_b_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+    } else {
+        gpio_config_t ref_cfg = {
+            .pin_bit_mask = 1ULL << ref_pin,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = pull_up,
+            .pull_down_en = pull_down,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        err = gpio_config(&ref_cfg);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+
     s_adc_channel = channel;
-    return yd_adc_config_channel_if_needed(channel);
+    err = yd_adc_config_channel(channel);
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (pair_mode) {
+        err = yd_adc_config_channel(ADC_CHANNEL_4);
+    }
+    return err;
 }
 
 int yd_adc_read_gpio4(int *raw) {
-    esp_err_t err = yd_adc_config_channel_if_needed(ADC_CHANNEL_3);
+    esp_err_t err = yd_adc_config_channel(ADC_CHANNEL_3);
     if (err != ESP_OK) {
         return err;
     }
@@ -261,14 +362,73 @@ int yd_adc_read_gpio4(int *raw) {
 }
 
 int yd_adc_read_active(int *raw) {
-    esp_err_t err = yd_adc_config_channel_if_needed(s_adc_channel);
+    esp_err_t err = yd_adc_config_channel(s_adc_channel);
     if (err != ESP_OK) {
         return err;
     }
     return adc_oneshot_read(s_adc1, s_adc_channel, raw);
 }
 
+int yd_adc_read_pair(int *raw_a, int *raw_b) {
+    esp_err_t err = yd_adc_config_channel(ADC_CHANNEL_3);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = yd_adc_config_channel(ADC_CHANNEL_4);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = adc_oneshot_read(s_adc1, ADC_CHANNEL_3, raw_a);
+    if (err != ESP_OK) {
+        return err;
+    }
+    return adc_oneshot_read(s_adc1, ADC_CHANNEL_4, raw_b);
+}
+
 int yd_audio_playback_prepare(void) {
+    return yd_audio_playback_prepare_mode(0);
+}
+
+int yd_audio_playback_prepare_mode(uint8_t mode) {
+    uint8_t freq_mode = (mode == 0) ? 0 : 1;
+    return yd_audio_playback_prepare_mode_freq(mode, freq_mode);
+}
+
+int yd_audio_playback_prepare_mode_freq(uint8_t mode, uint8_t pwm_freq_mode) {
+    yd_pwm_stop();
+
+    switch (pwm_freq_mode) {
+        case 0:
+            s_pwm_freq_hz = PWM_FREQ_NORMAL_HZ;
+            break;
+        case 1:
+            s_pwm_freq_hz = PWM_FREQ_MAX_LOUD_HZ;
+            break;
+        case 2:
+            s_pwm_freq_hz = PWM_FREQ_VERY_EXPERIMENTAL_HZ;
+            break;
+        default:
+            s_pwm_freq_hz = (mode == 0) ? PWM_FREQ_NORMAL_HZ : PWM_FREQ_MAX_LOUD_HZ;
+            break;
+    }
+
+    switch (mode) {
+        case 0:
+        case 1:
+            break;
+        case 2:
+            // SDM/PDM ist absichtlich nicht fest verdrahtet: ESP-IDF 5.2.x
+            // kann den Sigma-Delta-Treiber je nach Komponenten-/Header-Setup
+            // anders bereitstellen. Damit der Build stabil bleibt, faellt der
+            // Experimentiermodus sauber auf aggressives LEDC zurueck.
+            ESP_LOGW(TAG, "PLAYBACK mode 2 SDM/PDM not enabled in this build; falling back to MAX_LOUD_LEDC");
+            break;
+        default:
+            ESP_LOGW(TAG, "unknown PLAYBACK mode %u; using LEDC fallback", (unsigned)mode);
+            break;
+    }
+
+    ESP_LOGI(TAG, "playback LEDC PWM frequency: %lu Hz", (unsigned long)s_pwm_freq_hz);
     return yd_pwm_set_sample(128);
 }
 
@@ -278,7 +438,7 @@ int yd_pwm_set_sample(uint8_t sample) {
             .speed_mode = PWM_MODE,
             .duty_resolution = LEDC_TIMER_8_BIT,
             .timer_num = PWM_TIMER,
-            .freq_hz = PWM_FREQ_HZ,
+            .freq_hz = s_pwm_freq_hz,
             .clk_cfg = LEDC_AUTO_CLK,
         };
         esp_err_t err = ledc_timer_config(&timer);

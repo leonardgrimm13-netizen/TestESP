@@ -21,6 +21,7 @@ fn main() -> Result<()> {
 
     info!("YD-ESP32-23 ESP32-S3 Audio/SD/WAV startet");
     info!("Audio: GPIO4/GPIO5, SD: CS10 MOSI11 CLK12 MISO13, Button: GPIO21, RGB: GPIO48");
+    audio::log_build_config();
 
     let mut led = StatusLed::init().context("RGB-LED konnte nicht initialisiert werden")?;
     hw::init_button().context("Button GPIO21 konnte nicht initialisiert werden")?;
